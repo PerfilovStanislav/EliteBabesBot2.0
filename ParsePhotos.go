@@ -1,9 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"github.com/antchfx/htmlquery"
 	"github.com/disintegration/imaging"
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"golang.org/x/image/draw"
@@ -16,20 +16,23 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"telegram-bot-api"
 )
 
 const (
 	StateStart    = 0
 	StateInSearch = 1
-	WaterMark     = "555.png"
+	WaterMark     = "watermark.png"
 )
 
 var (
 	bot            *Bot
 	db             *sqlx.DB
 	imageWatermark image.Image
+	adminChannelId int64
 )
 
 type Bot struct {
@@ -38,6 +41,7 @@ type Bot struct {
 
 func initBot() {
 	bot = NewBot(os.Getenv("EliteBabesMultiParseBotToken"))
+	bot.Debug = true
 	//_, _ = bot.SetWebhook(tgbotapi.NewWebhook("https://aba3f4f4e933.ngrok.io/" + bot.Token))
 }
 
@@ -60,6 +64,7 @@ func main() {
 	initDb(os.Getenv("DB_NAME"))
 	initBot()
 	initWatermark()
+	adminChannelId, _ = strconv.ParseInt(os.Getenv("AdminChannelId"), 10, 64)
 
 	//updates := bot.ListenForWebhook("/" + bot.Token)
 	//go http.ListenAndServe(":3001", nil)
@@ -92,6 +97,7 @@ func getAlbums() {
 
 	getAlbum(albums[0].FirstChild.Data)
 	//getAlbum(albums[1].FirstChild.Data)
+	//getAlbum(albums[1].FirstChild.Data)
 	//getAlbum(albums[2].FirstChild.Data)
 	//for _, album := range albums {
 	//	getAlbum(album.FirstChild.Data)
@@ -99,6 +105,11 @@ func getAlbums() {
 }
 
 func getAlbum(albumUrl string) {
+	link := Link{}
+	if db.Get(&link, "SELECT id FROM links WHERE link=$1 LIMIT 1", albumUrl) == nil {
+		return
+	}
+
 	doc, err := htmlquery.LoadURL(albumUrl)
 	if err != nil {
 		return
@@ -107,53 +118,74 @@ func getAlbum(albumUrl string) {
 	dir := filepath.Base(albumUrl)
 	_ = os.Mkdir(dir, os.ModePerm)
 
-	var wg sync.WaitGroup
 	sizes := htmlquery.Find(doc, "//article[@id='content']/div[contains(@class, 'list-justified-container')]/ul/li/a/img//@srcset")
 	count := len(sizes)
-	if count == 0 {
+	if count < 10 {
 		return
 	}
+	model := htmlquery.Find(doc, "//div[@class='link-btn']/h2[2]/a/text()")[0].Data
 
 	// [0,2,4,6,7,8,9,11,13,14]
 	keys := make([]int, 0, 10)
 	keys = append(keys, 0)
-	for i := 1; i <= 8; i++ {
-		key := math.Round(float64(i) * float64(count-2) / 8.0)
+	for i := 1; i <= 3; i++ {
+		key := math.Round(float64(i) * float64(count-2) / 3.0)
 		keys = append(keys, int(key))
 	}
 	keys = append(keys, count-1)
 
+	// download files and set watermark
+	var files []interface{}
+	var wg sync.WaitGroup
 	for key := range keys {
 		var photoUrl = strings.Split(strings.Split(sizes[key].FirstChild.Data, ", ")[0], " ")[0]
 		wg.Add(1)
-		downloadFile(dir, photoUrl, &wg)
+		filename := downloadFile(dir, photoUrl, &wg)
+		files = append(files, tgbotapi.NewInputMediaPhoto(dir+"/"+filename))
 	}
 	wg.Wait()
+
+	result, _ := bot.SendMediaGroup(tgbotapi.NewMediaGroup(adminChannelId, files))
+
+	values := make([]string, 0, 5)
+	for _, fileInfo := range result {
+		values = append(values, fmt.Sprintf("('%s',%d)", getFileIDFromMsg(fileInfo), fileInfo.MessageID))
+	}
+
+	if _, err = db.Exec(`
+		WITH _data(file_id, message_id) AS (
+			VALUES `+strings.Join(values, ", ")+`
+		), _links AS (
+			INSERT INTO links (link, status, model)
+			VALUES ($1, 1, $2)
+			ON CONFLICT DO NOTHING
+			RETURNING id
+		)
+		INSERT INTO media (link_id, file_id, message_id)
+		SELECT _links.id, _data.file_id, _data.message_id
+		FROM _data
+		CROSS JOIN _links`,
+		albumUrl,
+		model); err != nil {
+		panic(err)
+	}
 }
 
-func downloadFile(dir string, photoUrl string, wg *sync.WaitGroup) {
+func getFileIDFromMsg(message tgbotapi.Message) string {
+	return (message.Photo)[len(message.Photo)-1].FileID
+}
+
+func downloadFile(dir string, photoUrl string, wg *sync.WaitGroup) string {
 	defer wg.Done()
+	filename := filepath.Base(photoUrl)
 	resp, _ := http.Get(photoUrl)
 	defer resp.Body.Close()
 
-	filename := filepath.Base(photoUrl)
-	//out, err := os.Create(dir + "/" + filename)
-	//if err != nil {
-	//	panic(err)
-	//}
-	//defer out.Close()
-	//io.Copy(out, resp.Body)
-
 	setWatermark(dir, filename, resp.Body)
+	return filename
 }
 
-func setWatermark(dir string, filename string, body io.ReadCloser) {
-	fileMain := body
-	//if err != nil {
-	//	log.Fatalf("failed to open: %s", err)
-	//}
-	//defer fileMain.Close()
-
+func setWatermark(dir string, filename string, fileMain io.ReadCloser) {
 	imageMain, err := jpeg.Decode(fileMain)
 	if err != nil {
 		log.Fatalf("failed to decode: %s", err)
