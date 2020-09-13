@@ -1,6 +1,7 @@
 package main
 
 import (
+	"EliteBabesBot2.0/shared"
 	"fmt"
 	"github.com/antchfx/htmlquery"
 	"github.com/disintegration/imaging"
@@ -33,18 +34,14 @@ const (
 )
 
 var (
-	bot            *Bot
+	bot            *shared.Bot
 	db             *sqlx.DB
 	imageWatermark image.Image
 	adminGroupId   int64
 )
 
-type Bot struct {
-	*tgbotapi.BotAPI
-}
-
 func initBot() {
-	bot = NewBot(os.Getenv("EliteBabesMultiParseBotToken"))
+	bot = shared.NewBot(os.Getenv("EliteBabesMultiParseBotToken"))
 	bot.Debug = true
 	//_, _ = bot.SetWebhook(tgbotapi.NewWebhook("https://aba3f4f4e933.ngrok.io/" + bot.Token))
 }
@@ -84,32 +81,39 @@ func main() {
 		if update.Message.ReplyToMessage != nil {
 			text := update.Message.Text
 			if text == "/del" || text == "/del@EliteBabesMultiParseBot" {
-				var medias []Media
-				_ = db.Select(&medias, `
-					select _m2.link_id, _m2.message_id
-					from media _m1
-					join media _m2 ON _m2.link_id = _m1.link_id
-					where _m1.message_id = $1
-				`, update.Message.ReplyToMessage.MessageID)
-
-				medias = append(medias, Media{
-					MessageId: update.Message.ReplyToMessage.MessageID,
-				})
-				for _, media := range medias {
-					deleteMessage := tgbotapi.NewDeleteMessage(adminGroupId, media.MessageId)
-					if _, err := bot.Send(deleteMessage); err != nil {
-						panic(err)
-					}
-				}
-
-				db.Exec(`
-					UPDATE links SET status = $1
-					WHERE id = $2`,
-					StatusDeleted, medias[0].LinkId)
-
+				delAlbum(update.Message.ReplyToMessage.MessageID)
 			}
 		}
 	}
+}
+
+func delAlbum(messageId int) {
+	var medias []Media
+	_ = db.Select(&medias, `
+		select _m2.link_id, _m2.message_id
+		from media _m1
+		join media _m2 ON _m2.link_id = _m1.link_id
+		where _m1.message_id = $1`,
+		messageId,
+	)
+
+	medias = append(medias, Media{
+		MessageId: messageId,
+	})
+	for _, media := range medias {
+		deleteMessage := tgbotapi.NewDeleteMessage(adminGroupId, media.MessageId)
+		if _, err := bot.ReSend(deleteMessage); err != nil {
+			fmt.Println(err)
+			time.Sleep(time.Minute * time.Duration(1))
+			return
+		}
+	}
+
+	db.Exec(`
+		UPDATE links SET status = $1
+		WHERE id = $2`,
+		StatusDeleted, medias[0].LinkId,
+	)
 }
 
 func isValidUrl(path string) bool {
@@ -141,7 +145,11 @@ func getAlbums(siteLink string) {
 		fmt.Sprintf("*Aльбомов*: %d\n*Активных*: %d\n*Удалённых*: %d", len(albums), activeCount, removedCount),
 	)
 	config.ParseMode = tgbotapi.ModeMarkdownV2
-	_, _ = bot.Send(config)
+	if _, err = bot.ReSend(config); err != nil {
+		fmt.Println(err)
+		time.Sleep(time.Second * time.Duration(10))
+		return
+	}
 
 	for _, album := range albums {
 		getAlbum(album.FirstChild.Data)
@@ -209,9 +217,11 @@ func getAlbum(albumUrl string) {
 	}
 	wg.Wait()
 
-	result, err := bot.SendMediaGroup(tgbotapi.NewMediaGroup(adminGroupId, files))
+	result, err := bot.ReSendMediaGroup(tgbotapi.NewMediaGroup(adminGroupId, files))
 	if err != nil {
-		panic(err)
+		fmt.Println(err)
+		time.Sleep(time.Minute * time.Duration(1))
+		return
 	}
 
 	values := make([]string, 0, 10)
@@ -272,11 +282,4 @@ func setWatermark(dir string, filename string, fileMain io.ReadCloser) {
 	}
 	defer fileResult.Close()
 	_ = jpeg.Encode(fileResult, imageResult, &jpeg.Options{Quality: 100})
-}
-
-func NewBot(token string) *Bot {
-	bot, _ := tgbotapi.NewBotAPI(token)
-	return &Bot{
-		BotAPI: bot,
-	}
 }
