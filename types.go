@@ -6,6 +6,7 @@ type Link struct {
 	Status      int
 	Model       string
 	Description string
+	ChatId      int `db:"chat_id"`
 }
 
 type Media struct {
