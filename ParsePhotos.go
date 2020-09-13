@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"telegram-bot-api"
 	"time"
 )
@@ -38,12 +37,26 @@ var (
 	db             *sqlx.DB
 	imageWatermark image.Image
 	adminGroupId   int64
+	parseStatus    = 0
 )
 
 func initBot() {
 	bot = shared.NewBot(os.Getenv("EliteBabesMultiParseBotToken"))
 	bot.Debug = true
 	//_, _ = bot.SetWebhook(tgbotapi.NewWebhook("https://aba3f4f4e933.ngrok.io/" + bot.Token))
+
+	adminGroupId, _ = strconv.ParseInt(os.Getenv("AdminGroupId"), 10, 64)
+
+	//webHook := tgbotapi.NewWebhook("https://e6bac8f66ab4.ngrok.io/go/" + bot.Token)
+	//bot.Send(webHook)
+
+	//bot.Send(tgbotapi.NewSetMyCommands(tgbotapi.BotCommand{
+	//	Command:     "del",
+	//	Description: "удалить подборку",
+	//}, tgbotapi.BotCommand{
+	//	Command:     "stop_parsing",
+	//	Description: "остановить парсинг сайта",
+	//}))
 }
 
 func initWatermark() {
@@ -63,31 +76,37 @@ func initWatermark() {
 
 func main() {
 	initDb(os.Getenv("DB_NAME"))
-	initBot()
 	initWatermark()
-	adminGroupId, _ = strconv.ParseInt(os.Getenv("AdminGroupId"), 10, 64)
-
-	webHook := tgbotapi.NewWebhook("https://89a8bed9aa2d.ngrok.io/go/" + bot.Token)
-	result, err := bot.Send(webHook)
-	fmt.Println(result, err)
+	initBot()
 
 	updates := bot.ListenForWebhook("/go/" + bot.Token)
 	go http.ListenAndServe(":3005", nil)
 
 	for update := range updates {
-		if isValidUrl(update.Message.Text) {
-			getAlbums(update.Message.Text)
+		go processUpdate(update)
+	}
+}
+
+func processUpdate(update tgbotapi.Update) {
+	text := update.Message.Text
+	if text != "" {
+		if isValidUrl(text) {
+			parseStatus = 1
+			getAlbums(text)
 		}
-		if update.Message.ReplyToMessage != nil {
-			text := update.Message.Text
-			if text == "/del" || text == "/del@EliteBabesMultiParseBot" {
-				delAlbum(update.Message.ReplyToMessage.MessageID)
-			}
+		if text == "/stop_parsing" || text == "/stop_parsing@EliteBabesMultiParseBot" {
+			parseStatus = 2
+		}
+	}
+	if update.Message.ReplyToMessage != nil {
+		replyText := update.Message.Text
+		if replyText == "/del" || replyText == "/del@EliteBabesMultiParseBot" {
+			delAlbum(update.Message.ReplyToMessage.MessageID, update.Message.MessageID)
 		}
 	}
 }
 
-func delAlbum(messageId int) {
+func delAlbum(messageId int, originalMessageId int) {
 	var medias []Media
 	_ = db.Select(&medias, `
 		select _m2.link_id, _m2.message_id
@@ -98,15 +117,11 @@ func delAlbum(messageId int) {
 	)
 
 	medias = append(medias, Media{
-		MessageId: messageId,
+		MessageId: originalMessageId,
 	})
 	for _, media := range medias {
 		deleteMessage := tgbotapi.NewDeleteMessage(adminGroupId, media.MessageId)
-		if _, err := bot.ReSend(deleteMessage); err != nil {
-			fmt.Println(err)
-			time.Sleep(time.Minute * time.Duration(1))
-			return
-		}
+		bot.Send(deleteMessage)
 	}
 
 	db.Exec(`
@@ -152,6 +167,13 @@ func getAlbums(siteLink string) {
 	}
 
 	for _, album := range albums {
+		if parseStatus != 1 {
+			bot.ReSend(tgbotapi.NewMessage(
+				adminGroupId,
+				"Процесс остановлен!",
+			))
+			return
+		}
 		getAlbum(album.FirstChild.Data)
 	}
 }
@@ -166,7 +188,7 @@ func getSavedCount(albums []*html.Node) (int, int) {
 		SELECT count(*) FILTER (WHERE status = 1) as active, count(*) FILTER (WHERE status = 2) as removed
 		FROM links
 		WHERE links.chat_id = $1 AND links.link = any($2) 
-	`, adminGroupId, pq.Array(links)).Scan(&activeCount, removedCount)
+	`, adminGroupId, pq.Array(links)).Scan(&activeCount, &removedCount)
 
 	return activeCount, removedCount
 }
@@ -203,11 +225,9 @@ func getAlbum(albumUrl string) {
 
 	// download files and set watermark
 	var files []interface{}
-	var wg sync.WaitGroup
 	for key := range keys {
 		var photoUrl = strings.Split(strings.Split(sizes[key].FirstChild.Data, ", ")[0], " ")[0]
-		wg.Add(1)
-		filename := downloadFile(dir, photoUrl, &wg)
+		filename := downloadFile(dir, photoUrl)
 		media := tgbotapi.NewInputMediaPhoto(dir + "/" + filename)
 		if key == 0 {
 			media.Caption = fmt.Sprintf("*Модель:* %s", model)
@@ -215,7 +235,6 @@ func getAlbum(albumUrl string) {
 		}
 		files = append(files, media)
 	}
-	wg.Wait()
 
 	result, err := bot.ReSendMediaGroup(tgbotapi.NewMediaGroup(adminGroupId, files))
 	if err != nil {
@@ -247,15 +266,20 @@ func getAlbum(albumUrl string) {
 		adminGroupId); err != nil {
 		panic(err)
 	}
-	time.Sleep(time.Minute * time.Duration(1))
+	_ = os.RemoveAll("./" + dir + "/")
+	for i := 1; i <= 60; i++ {
+		if parseStatus != 1 {
+			return
+		}
+		time.Sleep(time.Second * time.Duration(1))
+	}
 }
 
 func getFileIdFromGroupMedia(message tgbotapi.Message) string {
 	return (message.Photo)[len(message.Photo)-1].FileID
 }
 
-func downloadFile(dir string, photoUrl string, wg *sync.WaitGroup) string {
-	defer wg.Done()
+func downloadFile(dir string, photoUrl string) string {
 	filename := filepath.Base(photoUrl)
 	resp, _ := http.Get(photoUrl)
 	defer resp.Body.Close()
