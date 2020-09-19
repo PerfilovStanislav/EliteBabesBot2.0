@@ -2,6 +2,7 @@ package main
 
 import (
 	"EliteBabesBot2.0/shared"
+	"encoding/json"
 	"fmt"
 	"github.com/antchfx/htmlquery"
 	"github.com/disintegration/imaging"
@@ -27,36 +28,51 @@ import (
 )
 
 const (
-	WaterMark     = "watermark.png"
-	StatusActive  = 1
-	StatusDeleted = 2
+	WaterMark       = "watermark.png"
+	StatusActive    = 1
+	StatusDeleted   = 2
+	StatusPublished = 3
+
+	CronActionChangeHour   = 1
+	CronActionChangeMinute = 2
+	CronActionSetTime      = 3
+	CronActionDelete       = 4
 )
 
 var (
-	bot            *shared.Bot
-	db             *sqlx.DB
-	imageWatermark image.Image
-	adminGroupId   int64
-	parseStatus    = 0
+	bot              *shared.Bot
+	db               *sqlx.DB
+	imageWatermark   image.Image
+	adminGroupId     int64
+	publishChannelId int64
+	parseStatus      = 0
+
+	refreshCrons = true
 )
 
 func initBot() {
 	bot = shared.NewBot(os.Getenv("EliteBabesMultiParseBotToken"))
 	bot.Debug = true
-	//_, _ = bot.SetWebhook(tgbotapi.NewWebhook("https://aba3f4f4e933.ngrok.io/" + bot.Token))
+
+	//_, _ = bot.Send(tgbotapi.NewWebhook("https://8eea3a2be216.ngrok.io/go/" + bot.Token))
 
 	adminGroupId, _ = strconv.ParseInt(os.Getenv("AdminGroupId"), 10, 64)
+	publishChannelId, _ = strconv.ParseInt(os.Getenv("ChannelForPublishId"), 10, 64)
 
-	//webHook := tgbotapi.NewWebhook("https://e6bac8f66ab4.ngrok.io/go/" + bot.Token)
+	//webHook := tgbotapi.NewWebhook("https://4d595cb563d2.ngrok.io/go/" + bot.Token)
 	//bot.Send(webHook)
 
-	//bot.Send(tgbotapi.NewSetMyCommands(tgbotapi.BotCommand{
+	//result, err := bot.Send(tgbotapi.NewSetMyCommands(tgbotapi.BotCommand{
 	//	Command:     "del",
 	//	Description: "удалить подборку",
 	//}, tgbotapi.BotCommand{
 	//	Command:     "stop_parsing",
 	//	Description: "остановить парсинг сайта",
+	//}, tgbotapi.BotCommand{
+	//	Command:     "cron",
+	//	Description: "планировщик",
 	//}))
+	//fmt.Println(result, err)
 }
 
 func initWatermark() {
@@ -82,37 +98,242 @@ func main() {
 	updates := bot.ListenForWebhook("/go/" + bot.Token)
 	go http.ListenAndServe(":3005", nil)
 
+	go startCron()
+
 	for update := range updates {
 		go processUpdate(update)
 	}
+
+}
+
+func startCron() {
+	var crons []Cron
+	for {
+		if refreshCrons {
+			crons = []Cron{}
+			fillCrons(&crons)
+			refreshCrons = false
+		}
+
+		now := time.Now()
+		for _, cron := range crons {
+			if (cron.Hour+21)%24 == now.UTC().Hour() && cron.Minute == now.Minute() {
+				work()
+			}
+		}
+		time.Sleep(time.Second * time.Duration(60-time.Now().Second()))
+	}
+}
+
+func work() {
+	link := Link{}
+	if db.Get(&link, `
+		SELECT id, model
+		FROM links
+		WHERE status = $1 AND chat_id = $2
+		ORDER BY id
+	`, StatusActive, adminGroupId) != nil {
+		return
+	}
+
+	sendPhotos(link)
+}
+
+func sendPhotos(link Link) {
+	var medias []Media
+	_ = db.Select(&medias, `
+		SELECT file_id, message_id FROM media where link_id = $1 order by message_id
+	`, link.Id)
+
+	var files []interface{}
+	for i, media := range medias {
+		inpMedia := tgbotapi.NewInputMediaPhoto(media.FileId)
+		if i == 0 {
+			inpMedia.ParseMode = tgbotapi.ModeMarkdown
+			inpMedia.Caption = fmt.Sprintf("[Channel](https://t.me/joinchat/%s) #%s",
+				os.Getenv("ChannelForPublishLink"), strings.Replace(link.Model, " ", "", -1))
+		}
+		files = append(files, inpMedia)
+	}
+	config := tgbotapi.NewMediaGroup(publishChannelId, files)
+	_, _ = bot.ReSendMediaGroup(config)
+
+	// Удаляем альбом
+	for _, media := range medias {
+		deleteMessage := tgbotapi.NewDeleteMessage(adminGroupId, media.MessageId)
+		_, _ = bot.Send(deleteMessage)
+	}
+	_, _ = db.Exec(`UPDATE links SET status = $1 where id = $2`, StatusPublished, link.Id)
+}
+
+func fillCrons(crons *[]Cron) {
+	_ = db.Select(crons, `
+		SELECT
+			id,
+			extract(hour from time) as hour,
+			extract(minute from time) as minute
+		FROM cron
+		WHERE bot_id = $1
+		ORDER BY hour, minute
+	`, bot.Self.ID)
 }
 
 func processUpdate(update tgbotapi.Update) {
-	text := update.Message.Text
-	if text != "" {
-		if isValidUrl(text) {
-			parseStatus = 1
-			getAlbums(text)
+	if update.Message != nil {
+		text := update.Message.Text
+		if text != "" {
+			command := strings.Split(text, "@")[0]
+			if isValidUrl(text) {
+				parseStatus = 1
+				getAlbums(text)
+			} else if command == "/stop_parsing" {
+				parseStatus = 2
+			} else if command == "/cron" {
+				showCron(update.Message.Chat.ID)
+			} else if command == "/del" && update.Message.ReplyToMessage != nil {
+				delAlbum(update.Message.ReplyToMessage.MessageID, update.Message.MessageID)
+			}
 		}
-		if text == "/stop_parsing" || text == "/stop_parsing@EliteBabesMultiParseBot" {
-			parseStatus = 2
+	} else if update.CallbackQuery != nil {
+		var action Action
+		_ = json.Unmarshal([]byte(update.CallbackQuery.Data), &action)
+		if action.Action == CronActionChangeHour {
+			changeCronHour(update.CallbackQuery.Message, action.Cron)
+		} else if action.Action == CronActionChangeMinute {
+			changeCronMinute(update.CallbackQuery.Message, action.Cron)
+		} else if action.Action == CronActionSetTime {
+			setCronTime(update.CallbackQuery.Message, action.Cron)
+		} else if action.Action == CronActionDelete {
+			deleteCronTime(update.CallbackQuery.Message, action.Cron)
 		}
 	}
-	if update.Message.ReplyToMessage != nil {
-		replyText := update.Message.Text
-		if replyText == "/del" || replyText == "/del@EliteBabesMultiParseBot" {
-			delAlbum(update.Message.ReplyToMessage.MessageID, update.Message.MessageID)
+}
+
+func changeCronHour(message *tgbotapi.Message, cron Cron) {
+	var keyboard tgbotapi.InlineKeyboardMarkup
+	for row := 0; row < 6; row++ {
+		var buttons []tgbotapi.InlineKeyboardButton
+		for col := 0; col < 4; col++ {
+			cron.Hour = row + col*6
+			buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("%.2d", cron.Hour),
+				cronAction(CronActionChangeMinute, cron),
+			))
 		}
+		keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, buttons)
 	}
+	_, _ = bot.ReSend(tgbotapi.NewEditMessageReplyMarkup(
+		message.Chat.ID,
+		message.MessageID,
+		keyboard,
+	))
+}
+
+func changeCronMinute(message *tgbotapi.Message, cron Cron) {
+	var keyboard tgbotapi.InlineKeyboardMarkup
+	for row := 0; row < 15; row++ {
+		var buttons []tgbotapi.InlineKeyboardButton
+		for col := 0; col < 4; col++ {
+			cron.Minute = row + col*15
+			buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("%.2d:%.2d", cron.Hour, cron.Minute),
+				cronAction(CronActionSetTime, cron),
+			))
+		}
+		keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, buttons)
+	}
+	_, _ = bot.ReSend(tgbotapi.NewEditMessageReplyMarkup(
+		message.Chat.ID,
+		message.MessageID,
+		keyboard,
+	))
+}
+
+func setCronTime(message *tgbotapi.Message, cron Cron) {
+	if cron.Id > 0 {
+		_, _ = db.Exec(`
+			UPDATE cron
+			SET time = $1
+			WHERE id = $2`,
+			fmt.Sprintf("%.2d:%.2d:00", cron.Hour, cron.Minute), cron.Id,
+		)
+	} else {
+		_, _ = db.Exec(`
+			INSERT INTO cron (time, bot_id) 
+			VALUES ($1, $2)`,
+			fmt.Sprintf("%.2d:%.2d:00", cron.Hour, cron.Minute), bot.Self.ID,
+		)
+	}
+
+	config := tgbotapi.NewEditMessageText(
+		message.Chat.ID,
+		message.MessageID,
+		fmt.Sprintf("Время установлено \nМск: *%.2d:%.2d* \nUTC: *%.2d:%.2d*",
+			cron.Hour, cron.Minute,
+			(cron.Hour+21)%24, cron.Minute),
+	)
+	config.ParseMode = tgbotapi.ModeMarkdownV2
+	_, _ = bot.ReSend(config)
+
+	refreshCrons = true
+}
+
+func deleteCronTime(message *tgbotapi.Message, cron Cron) {
+	_, _ = db.Exec(`
+			DELETE FROM cron
+			WHERE id = $1`,
+		cron.Id,
+	)
+
+	config := tgbotapi.NewEditMessageText(
+		message.Chat.ID,
+		message.MessageID,
+		fmt.Sprintf("Удален cron \nМск: *%.2d:%.2d* \nUTC: *%.2d:%.2d*",
+			cron.Hour, cron.Minute,
+			(cron.Hour+21)%24, cron.Minute),
+	)
+	config.ParseMode = tgbotapi.ModeMarkdownV2
+	_, _ = bot.ReSend(config)
+}
+
+func showCron(chatId int64) {
+	var crons []Cron
+	fillCrons(&crons)
+
+	cronMessage := tgbotapi.NewMessage(chatId, "_Планировщик_")
+	cronMessage.ParseMode = tgbotapi.ModeMarkdownV2
+	var rows = make([][]tgbotapi.InlineKeyboardButton, 0)
+	for _, c := range crons {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("%.2d:%.2d", c.Hour, c.Minute),
+				cronAction(CronActionChangeHour, c),
+			),
+			tgbotapi.NewInlineKeyboardButtonData("❌", cronAction(CronActionDelete, c)),
+		))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("Добавить", cronAction(CronActionChangeHour, Cron{})),
+	))
+	cronMessage.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
+	_, _ = bot.ReSend(cronMessage)
+}
+
+func cronAction(action int, cron Cron) string {
+	changeData, _ := json.Marshal(Action{
+		Action: action,
+		Cron:   cron,
+	})
+	return string(changeData)
 }
 
 func delAlbum(messageId int, originalMessageId int) {
 	var medias []Media
 	_ = db.Select(&medias, `
-		select _m2.link_id, _m2.message_id
-		from media _m1
-		join media _m2 ON _m2.link_id = _m1.link_id
-		where _m1.message_id = $1`,
+		SELECT _m2.link_id, _m2.message_id
+		FROM media _m1
+		JOIN media _m2 ON _m2.link_id = _m1.link_id
+		WHERE _m1.message_id = $1`,
 		messageId,
 	)
 
@@ -121,10 +342,10 @@ func delAlbum(messageId int, originalMessageId int) {
 	})
 	for _, media := range medias {
 		deleteMessage := tgbotapi.NewDeleteMessage(adminGroupId, media.MessageId)
-		bot.Send(deleteMessage)
+		_, _ = bot.Send(deleteMessage)
 	}
 
-	db.Exec(`
+	_, _ = db.Exec(`
 		UPDATE links SET status = $1
 		WHERE id = $2`,
 		StatusDeleted, medias[0].LinkId,
@@ -212,7 +433,11 @@ func getAlbum(albumUrl string) {
 	if count < 10 {
 		return
 	}
-	model := htmlquery.Find(doc, "//div[@class='link-btn']/h2[2]/a/text()")[0].Data
+	models := htmlquery.Find(doc, "//div[@class='link-btn']/h2[2]/a/text()")
+	if models == nil {
+		models = htmlquery.Find(doc, "//div[@class='link-btn']/h2[1]/a/text()")
+	}
+	model := models[0].Data
 
 	// [0,2,4,6,7,8,9,11,13,14]
 	keys := make([]int, 0, 10)

@@ -14,3 +14,14 @@ type Media struct {
 	FileId    string `db:"file_id"`
 	MessageId int    `db:"message_id"`
 }
+
+type Cron struct {
+	Id     int `json:"id"`
+	Hour   int `json:"hour"`
+	Minute int `json:"minute"`
+}
+
+type Action struct {
+	Action int  `json:"action"`
+	Cron   Cron `json:"cron"`
+}
