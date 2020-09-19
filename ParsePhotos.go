@@ -59,9 +59,6 @@ func initBot() {
 	adminGroupId, _ = strconv.ParseInt(os.Getenv("AdminGroupId"), 10, 64)
 	publishChannelId, _ = strconv.ParseInt(os.Getenv("ChannelForPublishId"), 10, 64)
 
-	//webHook := tgbotapi.NewWebhook("https://4d595cb563d2.ngrok.io/go/" + bot.Token)
-	//bot.Send(webHook)
-
 	//result, err := bot.Send(tgbotapi.NewSetMyCommands(tgbotapi.BotCommand{
 	//	Command:     "del",
 	//	Description: "удалить подборку",
