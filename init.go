@@ -8,6 +8,7 @@ import (
 )
 
 func init() {
+	shared.SingleProcess("StrawberryEliteBabes")
 	shared.LoadEnv()
 }
 

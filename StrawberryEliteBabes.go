@@ -50,11 +50,27 @@ var (
 	refreshCrons = true
 )
 
+func main() {
+	initDb(os.Getenv("DB_NAME"))
+	initWatermark()
+	initBot()
+
+	updates := bot.ListenForWebhook(os.Getenv("LocalUrl"))
+	go http.ListenAndServe(":"+os.Getenv("localPort"), nil)
+
+	go startCron()
+
+	for update := range updates {
+		go processUpdate(update)
+	}
+
+}
+
 func initBot() {
 	bot = shared.NewBot(os.Getenv("EliteBabesMultiParseBotToken"))
 	bot.Debug = true
 
-	//_, _ = bot.Send(tgbotapi.NewWebhook("https://8eea3a2be216.ngrok.io/go/" + bot.Token))
+	_, _ = bot.Send(tgbotapi.NewWebhook(os.Getenv("WebhookUrl") + os.Getenv("LocalUrl")))
 
 	adminGroupId, _ = strconv.ParseInt(os.Getenv("AdminGroupId"), 10, 64)
 	publishChannelId, _ = strconv.ParseInt(os.Getenv("ChannelForPublishId"), 10, 64)
@@ -85,22 +101,6 @@ func initWatermark() {
 	}
 
 	imageWatermark = imaging.Resize(imageWatermark, 50, 50, imaging.Lanczos)
-}
-
-func main() {
-	initDb(os.Getenv("DB_NAME"))
-	initWatermark()
-	initBot()
-
-	updates := bot.ListenForWebhook("/go/" + bot.Token)
-	go http.ListenAndServe(":3005", nil)
-
-	go startCron()
-
-	for update := range updates {
-		go processUpdate(update)
-	}
-
 }
 
 func startCron() {
@@ -147,7 +147,7 @@ func sendPhotos(link Link) {
 		inpMedia := tgbotapi.NewInputMediaPhoto(media.FileId)
 		if i == 0 {
 			inpMedia.ParseMode = tgbotapi.ModeMarkdown
-			inpMedia.Caption = fmt.Sprintf("[Channel](https://t.me/joinchat/%s) #%s",
+			inpMedia.Caption = fmt.Sprintf("🍓 [Channel](%s) #%s",
 				os.Getenv("ChannelForPublishLink"), strings.Replace(link.Model, " ", "", -1))
 		}
 		files = append(files, inpMedia)
