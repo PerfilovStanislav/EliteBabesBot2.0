@@ -1,7 +1,6 @@
 package shared
 
 import (
-	"fmt"
 	"github.com/fatih/color"
 	"github.com/joho/godotenv"
 	"github.com/mitchellh/go-ps"
@@ -52,7 +51,7 @@ func NewBot(token string) *Bot {
 func (b *Bot) ReSend(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 	var resp, err = b.BotAPI.Send(c)
 	if err != nil {
-		var botError = err.(*tgbotapi.Error)
+		var botError = err.(tgbotapi.Error)
 		if botError.RetryAfter > 0 {
 			time.Sleep(time.Second * (time.Duration(botError.RetryAfter) + 1))
 			return b.ReSend(c)
@@ -65,10 +64,9 @@ func (b *Bot) ReSend(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 }
 
 func (b *Bot) ReSendMediaGroup(c tgbotapi.MediaGroupConfig) ([]tgbotapi.Message, error) {
-	var resp, err = b.SendMediaGroup(c)
+	var resp, err = b.BotAPI.SendMediaGroup(c)
 	if err != nil {
-		fmt.Println(err)
-		var botError = err.(*tgbotapi.Error)
+		var botError = err.(tgbotapi.Error)
 		if botError.RetryAfter > 0 {
 			time.Sleep(time.Second * (time.Duration(botError.RetryAfter) + 1))
 			return b.ReSendMediaGroup(c)
