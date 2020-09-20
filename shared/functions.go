@@ -1,6 +1,7 @@
 package shared
 
 import (
+	"fmt"
 	"github.com/fatih/color"
 	"github.com/joho/godotenv"
 	"github.com/mitchellh/go-ps"
@@ -36,6 +37,8 @@ func SingleProcess(name string) {
 
 	if count > 1 {
 		os.Exit(0)
+	} else if count == 0 {
+		panic(processList)
 	}
 }
 
@@ -62,15 +65,16 @@ func (b *Bot) ReSend(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 }
 
 func (b *Bot) ReSendMediaGroup(c tgbotapi.MediaGroupConfig) ([]tgbotapi.Message, error) {
-	var resp, err = b.BotAPI.SendMediaGroup(c)
+	var resp, err = b.SendMediaGroup(c)
 	if err != nil {
+		fmt.Println(err)
 		var botError = err.(*tgbotapi.Error)
 		if botError.RetryAfter > 0 {
 			time.Sleep(time.Second * (time.Duration(botError.RetryAfter) + 1))
 			return b.ReSendMediaGroup(c)
 		} else {
 			time.Sleep(time.Second * time.Duration(10))
-			return b.BotAPI.SendMediaGroup(c)
+			return b.SendMediaGroup(c)
 		}
 	}
 	return resp, err

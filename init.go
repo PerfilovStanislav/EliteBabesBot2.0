@@ -8,8 +8,8 @@ import (
 )
 
 func init() {
-	shared.SingleProcess("StrawberryEliteBabes")
 	shared.LoadEnv()
+	shared.SingleProcess(os.Getenv("ProcessName"))
 }
 
 func initDb(dbName string) {
