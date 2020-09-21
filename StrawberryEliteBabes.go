@@ -371,10 +371,12 @@ func getAlbums(siteLink string) {
 	albums := htmlquery.Find(doc, "//article[@id='content']/ul[contains(@class, 'gallery-a') "+
 		"and not(contains(@class, 'clip-a'))]//li[not(contains(@class, 'vid'))]/a/@href")
 
-	var activeCount, removedCount = getSavedCount(albums)
+	var activeCount, removedCount, publishedCount = getSavedCount(albums)
 	var config = tgbotapi.NewMessage(
 		adminGroupId,
-		fmt.Sprintf("*Aльбомов*: %d\n*Активных*: %d\n*Удалённых*: %d", len(albums), activeCount, removedCount),
+		fmt.Sprintf("*Aльбомов*: %d\n*Активных*: %d\n*Удалённых*: %d\n*Опубликованных*: %d\n*Осталось распарсить*: %d", len(albums),
+			activeCount, removedCount, publishedCount,
+			len(albums)-activeCount-removedCount-publishedCount),
 	)
 	config.ParseMode = tgbotapi.ModeMarkdownV2
 	if _, err = bot.ReSend(config); err != nil {
@@ -394,19 +396,22 @@ func getAlbums(siteLink string) {
 	}
 }
 
-func getSavedCount(albums []*html.Node) (int, int) {
-	var activeCount, removedCount int
+func getSavedCount(albums []*html.Node) (int, int, int) {
+	var activeCount, removedCount, publishedCount int
 	var links []string
 	for _, album := range albums {
 		links = append(links, album.FirstChild.Data)
 	}
 	_ = db.QueryRowx(`
-		SELECT count(*) FILTER (WHERE status = 1) as active, count(*) FILTER (WHERE status = 2) as removed
+		SELECT
+			count(*) FILTER (WHERE status = 1) as active,
+			count(*) FILTER (WHERE status = 2) as removed,
+			count(*) FILTER (WHERE status = 3) as published
 		FROM links
 		WHERE links.chat_id = $1 AND links.link = any($2) 
-	`, adminGroupId, pq.Array(links)).Scan(&activeCount, &removedCount)
+	`, adminGroupId, pq.Array(links)).Scan(&activeCount, &removedCount, &publishedCount)
 
-	return activeCount, removedCount
+	return activeCount, removedCount, publishedCount
 }
 
 func getAlbum(albumUrl string) {
