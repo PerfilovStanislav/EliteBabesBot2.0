@@ -68,7 +68,7 @@ func main() {
 
 func initBot() {
 	bot = shared.NewBot(os.Getenv("EliteBabesMultiParseBotToken"))
-	bot.Debug = true
+	//bot.Debug = true
 
 	_, _ = bot.Send(tgbotapi.NewWebhook(os.Getenv("WebhookUrl") + os.Getenv("LocalUrl")))
 
@@ -85,7 +85,6 @@ func initBot() {
 	//	Command:     "cron",
 	//	Description: "планировщик",
 	//}))
-	//fmt.Println(result, err)
 }
 
 func initWatermark() {
@@ -144,7 +143,7 @@ func sendPhotos(link Link) {
 
 	var files []interface{}
 	for i, media := range medias {
-		inpMedia := tgbotapi.NewInputMediaPhoto(media.FileId)
+		inpMedia := tgbotapi.NewInputMediaPhoto(tgbotapi.FileID(media.FileId))
 		if i == 0 {
 			inpMedia.ParseMode = tgbotapi.ModeMarkdown
 			inpMedia.Caption = fmt.Sprintf("🍓 [Channel](%s) #%s",
@@ -379,7 +378,6 @@ func getAlbums(siteLink string) {
 	)
 	config.ParseMode = tgbotapi.ModeMarkdownV2
 	if _, err = bot.ReSend(config); err != nil {
-		fmt.Println(err)
 		time.Sleep(time.Second * time.Duration(10))
 		return
 	}
@@ -460,7 +458,6 @@ func getAlbum(albumUrl string) {
 
 	result, err := bot.ReSendMediaGroup(tgbotapi.NewMediaGroup(adminGroupId, files))
 	if err != nil {
-		fmt.Println(err)
 		time.Sleep(time.Minute * time.Duration(1))
 		return
 	}
