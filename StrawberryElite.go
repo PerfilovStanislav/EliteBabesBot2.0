@@ -75,7 +75,7 @@ func initBot() {
 	adminGroupId, _ = strconv.ParseInt(os.Getenv("AdminGroupId"), 10, 64)
 	publishChannelId, _ = strconv.ParseInt(os.Getenv("ChannelForPublishId"), 10, 64)
 
-	//result, err := bot.Send(tgbotapi.NewSetMyCommands(tgbotapi.BotCommand{
+	//bot.Send(tgbotapi.NewSetMyCommands(tgbotapi.BotCommand{
 	//	Command:     "del",
 	//	Description: "удалить подборку",
 	//}, tgbotapi.BotCommand{
@@ -84,6 +84,15 @@ func initBot() {
 	//}, tgbotapi.BotCommand{
 	//	Command:     "cron",
 	//	Description: "планировщик",
+	//}, tgbotapi.BotCommand{
+	//	Command:     "stat",
+	//	Description: "статистика",
+	//}, tgbotapi.BotCommand{
+	//	Command:     "show_next",
+	//	Description: "показать следующий альбом",
+	//}, tgbotapi.BotCommand{
+	//	Command:     "menu",
+	//	Description: "Меню",
 	//}))
 }
 
@@ -128,6 +137,7 @@ func work() {
 		FROM links
 		WHERE status = $1 AND chat_id = $2
 		ORDER BY id
+		LIMIT 1
 	`, StatusActive, adminGroupId) != nil {
 		return
 	}
@@ -146,8 +156,8 @@ func sendPhotos(link Link) {
 		inpMedia := tgbotapi.NewInputMediaPhoto(tgbotapi.FileID(media.FileId))
 		if i == 0 {
 			inpMedia.ParseMode = tgbotapi.ModeMarkdown
-			inpMedia.Caption = fmt.Sprintf("🍓 [Channel](%s) #%s",
-				os.Getenv("ChannelForPublishLink"), strings.Replace(link.Model, " ", "", -1))
+			inpMedia.Caption = fmt.Sprintf("%s #%s",
+				os.Getenv("Description"), strings.Replace(link.Model, " ", "", -1))
 		}
 		files = append(files, inpMedia)
 	}
@@ -182,12 +192,18 @@ func processUpdate(update tgbotapi.Update) {
 			if isValidUrl(text) {
 				parseStatus = 1
 				getAlbums(text)
-			} else if command == "/stop_parsing" {
+			} else if command == "/stop_parsing" || text == "🏁 stop parsing" {
 				parseStatus = 2
-			} else if command == "/cron" {
+			} else if command == "/cron" || text == "⏰ cron" {
 				showCron(update.Message.Chat.ID)
 			} else if command == "/del" && update.Message.ReplyToMessage != nil {
 				delAlbum(update.Message.ReplyToMessage.MessageID, update.Message.MessageID)
+			} else if command == "/stat" || text == "📊 stat" {
+				showStat()
+			} else if command == "/show_next" || text == "🔜 show next" {
+				showNext()
+			} else if command == "/menu" {
+				showMenu()
 			}
 		}
 	} else if update.CallbackQuery != nil {
@@ -203,6 +219,51 @@ func processUpdate(update tgbotapi.Update) {
 			deleteCronTime(update.CallbackQuery.Message, action.Cron)
 		}
 	}
+}
+
+func showMenu() {
+	config := tgbotapi.NewMessage(adminGroupId, "Меню!")
+	config.ReplyMarkup = tgbotapi.NewOneTimeReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("🏁 stop parsing"),
+			tgbotapi.NewKeyboardButton("⏰ cron"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("📊 stat"),
+			tgbotapi.NewKeyboardButton("🔜 show next"),
+		),
+	)
+	_, _ = bot.ReSend(config)
+}
+
+func showNext() {
+	media := Media{}
+	if db.Get(&media, `
+		WITH _l AS (
+			SELECT l.id
+			FROM links l
+			WHERE l.status = $1 AND l.chat_id = $2
+			ORDER BY l.id
+			LIMIT 1
+		), _m AS (
+			SELECT min(message_id) as message_id, max(message_id) as max_message_id
+			FROM media m
+			JOIN _l on m.link_id = _l.id
+			WHERE m.link_id = _l.id
+		)
+		SELECT _m.message_id, m.file_id
+		FROM media m
+		JOIN _l ON _l.id = m.link_id
+		JOIN _m ON _m.max_message_id = m.message_id
+	`, StatusActive, adminGroupId) != nil {
+		return
+	}
+
+	config := tgbotapi.NewPhoto(adminGroupId, tgbotapi.FileID(media.FileId))
+	if media.MessageId != 0 {
+		config.ReplyToMessageID = media.MessageId
+	}
+	_, _ = bot.ReSend(config)
 }
 
 func changeCronHour(message *tgbotapi.Message, cron Cron) {
@@ -315,6 +376,32 @@ func showCron(chatId int64) {
 	_, _ = bot.ReSend(cronMessage)
 }
 
+func showStat() {
+	var activeCount, removedCount, publishedCount = getStat()
+	var config = tgbotapi.NewMessage(
+		adminGroupId,
+		fmt.Sprintf("*Не опубликованных*: %d\n*Удалённых*: %d\n*Опубликованных*: %d",
+			activeCount, removedCount, publishedCount),
+	)
+	config.ParseMode = tgbotapi.ModeMarkdownV2
+	result, err := bot.ReSend(config)
+	fmt.Println(result, err)
+}
+
+func getStat() (int, int, int) {
+	var activeCount, removedCount, publishedCount int
+	_ = db.QueryRowx(`
+		SELECT
+			count(*) FILTER (WHERE status = 1) as active,
+			count(*) FILTER (WHERE status = 2) as removed,
+			count(*) FILTER (WHERE status = 3) as published
+		FROM links
+		WHERE links.chat_id = $1
+	`, adminGroupId).Scan(&activeCount, &removedCount, &publishedCount)
+
+	return activeCount, removedCount, publishedCount
+}
+
 func cronAction(action int, cron Cron) string {
 	changeData, _ := json.Marshal(Action{
 		Action: action,
@@ -374,7 +461,7 @@ func getAlbums(siteLink string) {
 	var activeCount, removedCount, publishedCount = getSavedCount(albums)
 	var config = tgbotapi.NewMessage(
 		adminGroupId,
-		fmt.Sprintf("*Aльбомов*: %d\n*Активных*: %d\n*Удалённых*: %d\n*Опубликованных*: %d\n*Осталось распарсить*: %d", len(albums),
+		fmt.Sprintf("*Aльбомов*: %d\n*Уже в базе \\(Не опубликованных\\)*: %d\n*Удалённых*: %d\n*Опубликованных*: %d\n*Осталось распарсить*: %d", len(albums),
 			activeCount, removedCount, publishedCount,
 			len(albums)-activeCount-removedCount-publishedCount),
 	)
