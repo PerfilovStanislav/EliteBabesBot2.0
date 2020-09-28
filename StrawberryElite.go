@@ -93,6 +93,9 @@ func initBot() {
 	//}, tgbotapi.BotCommand{
 	//	Command:     "menu",
 	//	Description: "Меню",
+	//}, tgbotapi.BotCommand{
+	//	Command:     "send",
+	//	Description: "Отправить сейчас",
 	//}))
 }
 
@@ -143,6 +146,27 @@ func work() {
 	}
 
 	sendPhotos(link)
+}
+
+func sendNow(messageId int) {
+	link := Link{}
+	if db.Get(&link, `		
+		SELECT l.id, l.model, l.status
+		FROM media _m1
+		JOIN links l on _m1.link_id = l.id AND l.chat_id = $1
+		WHERE _m1.message_id = $2
+	`, adminGroupId, messageId) != nil {
+		return
+	}
+
+	if link.Status == StatusActive {
+		sendPhotos(link)
+	} else {
+		bot.ReSend(tgbotapi.NewMessage(
+			adminGroupId,
+			"Не удалось отправить",
+		))
+	}
 }
 
 func sendPhotos(link Link) {
@@ -198,6 +222,8 @@ func processUpdate(update tgbotapi.Update) {
 				showCron(update.Message.Chat.ID)
 			} else if command == "/del" && update.Message.ReplyToMessage != nil {
 				delAlbum(update.Message.ReplyToMessage.MessageID, update.Message.MessageID)
+			} else if command == "/send" && update.Message.ReplyToMessage != nil {
+				sendNow(update.Message.ReplyToMessage.MessageID)
 			} else if command == "/stat" || text == "📊 stat" {
 				showStat()
 			} else if command == "/show_next" || text == "🔜 show next" {
@@ -249,7 +275,6 @@ func showNext() {
 			SELECT min(message_id) as message_id, max(message_id) as max_message_id
 			FROM media m
 			JOIN _l on m.link_id = _l.id
-			WHERE m.link_id = _l.id
 		)
 		SELECT _m.message_id, m.file_id
 		FROM media m
@@ -415,9 +440,10 @@ func delAlbum(messageId int, originalMessageId int) {
 	_ = db.Select(&medias, `
 		SELECT _m2.link_id, _m2.message_id
 		FROM media _m1
+		JOIN links l on _m1.link_id = l.id AND l.chat_id = $1
 		JOIN media _m2 ON _m2.link_id = _m1.link_id
-		WHERE _m1.message_id = $1`,
-		messageId,
+		WHERE _m1.message_id = $2`,
+		adminGroupId, messageId,
 	)
 
 	medias = append(medias, Media{
