@@ -605,7 +605,12 @@ func setWatermark(dir string, filename string, fileMain io.ReadCloser) {
 		log.Fatalf("failed to decode: %s", err)
 	}
 
-	offset := image.Pt(20, imageMain.Bounds().Max.Y-70)
+	var offset image.Point
+	if os.Getenv("WatermarkPosition") == "BR" {
+		offset = image.Pt(imageMain.Bounds().Max.X-70, imageMain.Bounds().Max.Y-70)
+	} else {
+		offset = image.Pt(20, imageMain.Bounds().Max.Y-70)
+	}
 	bounds := imageMain.Bounds()
 	imageResult := image.NewRGBA(bounds)
 	draw.Draw(imageResult, bounds, imageMain, image.Point{}, draw.Src)
